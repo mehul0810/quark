@@ -414,7 +414,7 @@ function SettingsApp() {
 						</p>
 					</div>
 					<span className="aculect-ai-companion-pill aculect-ai-companion-pill--version">
-						{ data.version || '0.1.0' }
+						{ data.version || '0.2.0' }
 					</span>
 				</div>
 				<span className={ statusClass }>

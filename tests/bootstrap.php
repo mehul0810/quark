@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 require dirname( __DIR__ ) . '/vendor/autoload.php';
 
 if ( ! defined( 'ACULECT_AI_COMPANION_VERSION' ) ) {
-	define( 'ACULECT_AI_COMPANION_VERSION', '0.1.0' );
+	define( 'ACULECT_AI_COMPANION_VERSION', '0.2.0' );
 }
 
 $GLOBALS['aculect_ai_companion_test_options'] = array();
@@ -54,6 +54,22 @@ if ( ! function_exists( 'update_option' ) ) {
 		$GLOBALS['aculect_ai_companion_test_options'][ $option ] = $value;
 
 		return true;
+	}
+}
+
+if ( ! function_exists( 'apply_filters' ) ) {
+	/**
+	 * Return an unfiltered test value.
+	 *
+	 * @param string $hook_name Hook name.
+	 * @param mixed  $value     Filter value.
+	 * @param mixed  ...$args   Additional arguments.
+	 * @return mixed
+	 */
+	function apply_filters( string $hook_name, mixed $value, mixed ...$args ): mixed {
+		unset( $hook_name, $args );
+
+		return $value;
 	}
 }
 

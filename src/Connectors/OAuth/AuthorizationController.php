@@ -22,6 +22,16 @@ use WP_REST_Server;
 final class AuthorizationController {
 
 	private const NONCE_ACTION = 'aculect_ai_companion_oauth_authorize';
+	private const OAUTH_PARAMS = array(
+		'response_type',
+		'client_id',
+		'redirect_uri',
+		'scope',
+		'state',
+		'code_challenge',
+		'code_challenge_method',
+		'resource',
+	);
 
 	/**
 	 * Register the authorization endpoint.
@@ -89,8 +99,7 @@ final class AuthorizationController {
 	 * Render the admin-hosted OAuth consent screen.
 	 */
 	public function render_admin_consent(): void {
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- OAuth consent GET parameters are validated below before rendering.
-		$params  = $this->params_from_array( wp_unslash( $_GET ) );
+		$params  = $this->query_params();
 		$context = $this->authorization_context( $params, true );
 
 		$this->render_consent_markup( $context['params'], $context['client'], $context['resource'] );
@@ -100,8 +109,7 @@ final class AuthorizationController {
 	 * Process an approve or deny decision from the consent screen.
 	 */
 	public function handle_admin_consent(): void {
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- OAuth POST parameters are nonce-checked below before authorization is completed.
-		$params = $this->params_from_array( wp_unslash( $_POST ) );
+		$params = $this->posted_params();
 
 		if ( ! is_user_logged_in() ) {
 			( new Logger() )->info(
@@ -115,7 +123,8 @@ final class AuthorizationController {
 			exit;
 		}
 
-		if ( ! isset( $_POST['_wpnonce'] ) || ! wp_verify_nonce( sanitize_text_field( wp_unslash( (string) $_POST['_wpnonce'] ) ), self::NONCE_ACTION ) ) {
+		$nonce = $this->posted_nonce();
+		if ( '' === $nonce || ! wp_verify_nonce( $nonce, self::NONCE_ACTION ) ) {
 			( new Logger() )->warning(
 				'consent.invalid_nonce',
 				'OAuth consent submission failed nonce validation.',
@@ -127,7 +136,17 @@ final class AuthorizationController {
 		}
 
 		$context  = $this->authorization_context( $params, false );
-		$decision = sanitize_key( (string) ( $_POST['decision'] ?? '' ) );
+		$decision = $this->posted_decision();
+		if ( ! in_array( $decision, array( 'approve', 'deny' ), true ) ) {
+			( new Logger() )->warning(
+				'consent.invalid_decision',
+				'OAuth consent submission included an invalid decision.',
+				$this->log_context( $params, $context['client'], 'invalid_decision' ),
+				null,
+				400
+			);
+			$this->render_error( 'Invalid request', 'The authorization decision was not valid.', 400 );
+		}
 
 		$this->handle_decision( $context['params'], $context['client'], $context['resource'], $decision );
 	}
@@ -377,6 +396,17 @@ final class AuthorizationController {
 	private function authorization_context( array $params, bool $admin_context, ?WP_REST_Request $request = null ): array {
 		$resource = $this->resource_from_params( $params );
 
+		if ( 'code' !== (string) ( $params['response_type'] ?? '' ) ) {
+			( new Logger() )->warning(
+				'authorize.invalid_response_type',
+				'OAuth authorization request used an invalid response type.',
+				$this->log_context( $params, null, 'invalid_response_type' ),
+				$request,
+				400
+			);
+			$this->fail( 'Invalid response type', 'Aculect AI Companion only supports the OAuth authorization code flow.', 400, $admin_context );
+		}
+
 		if ( Helpers::mcp_resource() !== $resource ) {
 			( new Logger() )->warning(
 				'authorize.invalid_resource',
@@ -388,7 +418,7 @@ final class AuthorizationController {
 			$this->fail( 'Invalid connection URL', 'The requested connection URL does not match this WordPress site.', 400, $admin_context );
 		}
 
-		if ( 'S256' !== (string) ( $params['code_challenge_method'] ?? '' ) ) {
+		if ( ! $this->valid_code_challenge( (string) ( $params['code_challenge'] ?? '' ) ) || 'S256' !== (string) ( $params['code_challenge_method'] ?? '' ) ) {
 			( new Logger() )->warning(
 				'authorize.invalid_pkce',
 				'OAuth authorization request did not use PKCE S256.',
@@ -397,6 +427,17 @@ final class AuthorizationController {
 				400
 			);
 			$this->fail( 'PKCE required', 'Aculect AI Companion requires PKCE with the S256 code challenge method.', 400, $admin_context );
+		}
+
+		if ( ! $this->scope_tokens_supported( $this->scope_tokens_from_params( $params ) ) ) {
+			( new Logger() )->warning(
+				'authorize.invalid_scope',
+				'OAuth authorization request included unsupported scopes.',
+				$this->log_context( $params, null, 'invalid_scope' ),
+				$request,
+				400
+			);
+			$this->fail( 'Invalid scope', 'The requested OAuth scope is not supported by Aculect AI Companion.', 400, $admin_context );
 		}
 
 		$client = ( new ClientRepository() )->getClientEntity( (string) ( $params['client_id'] ?? '' ) );
@@ -458,13 +499,132 @@ final class AuthorizationController {
 	}
 
 	/**
-	 * Coerce request parameters to scalar strings.
+	 * Collect OAuth query parameters from the admin consent URL.
 	 *
-	 * @param array<string, mixed> $params Raw parameters.
 	 * @return array<string, string>
 	 */
-	private function params_from_array( array $params ): array {
-		return array_map( static fn( $value ): string => is_scalar( $value ) ? (string) $value : '', $params );
+	private function query_params(): array {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Public OAuth query parameters are allowlisted and sanitized by params_from_array().
+		return $this->params_from_array( $_GET, true );
+	}
+
+	/**
+	 * Collect OAuth POST parameters from the consent form.
+	 *
+	 * @return array<string, string>
+	 */
+	private function posted_params(): array {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- OAuth POST parameters are allowlisted and sanitized by params_from_array(); nonce is verified before action.
+		return $this->params_from_array( $_POST, true );
+	}
+
+	/**
+	 * Return the sanitized consent nonce from POST data.
+	 */
+	private function posted_nonce(): string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- This reads the nonce so it can be verified immediately by the caller.
+		if ( ! isset( $_POST['_wpnonce'] ) || ! is_scalar( $_POST['_wpnonce'] ) ) {
+			return '';
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- This reads the nonce so it can be verified immediately by the caller.
+		return sanitize_text_field( wp_unslash( (string) $_POST['_wpnonce'] ) );
+	}
+
+	/**
+	 * Return the sanitized approve/deny decision from POST data.
+	 */
+	private function posted_decision(): string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Consent decision is sanitized and validated before any action is taken.
+		if ( ! isset( $_POST['decision'] ) || ! is_scalar( $_POST['decision'] ) ) {
+			return '';
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Consent decision is sanitized and validated before any action is taken.
+		return sanitize_key( wp_unslash( (string) $_POST['decision'] ) );
+	}
+
+	/**
+	 * Allowlist and sanitize OAuth request parameters.
+	 *
+	 * @param array<string, mixed> $params Raw parameters.
+	 * @param bool                 $unslash Whether parameter values came from slashed superglobals.
+	 * @return array<string, string>
+	 */
+	private function params_from_array( array $params, bool $unslash = false ): array {
+		$output = array();
+
+		foreach ( self::OAUTH_PARAMS as $key ) {
+			if ( ! array_key_exists( $key, $params ) || ! is_scalar( $params[ $key ] ) ) {
+				continue;
+			}
+
+			$value = $unslash ? wp_unslash( (string) $params[ $key ] ) : (string) $params[ $key ];
+			$value = $this->sanitize_oauth_param( $key, $value );
+
+			if ( '' !== $value ) {
+				$output[ $key ] = $value;
+			}
+		}
+
+		return $output;
+	}
+
+	/**
+	 * Sanitize an OAuth parameter according to its protocol context.
+	 *
+	 * @param string $key   OAuth parameter name.
+	 * @param string $value Raw parameter value.
+	 */
+	private function sanitize_oauth_param( string $key, string $value ): string {
+		return match ( $key ) {
+			'response_type' => sanitize_key( $value ),
+			'client_id' => $this->sanitize_limited_text( $value, 160 ),
+			'redirect_uri', 'resource' => $this->sanitize_url_param( $value ),
+			'scope' => $this->sanitize_scope( $value ),
+			'state' => $this->sanitize_limited_text( $value, 512 ),
+			'code_challenge' => substr( preg_replace( '/[^A-Za-z0-9_-]/', '', sanitize_text_field( $value ) ) ?? '', 0, 128 ),
+			'code_challenge_method' => strtoupper( sanitize_text_field( $value ) ),
+			default => '',
+		};
+	}
+
+	/**
+	 * Sanitize bounded opaque OAuth text.
+	 *
+	 * @param string $value Raw text value.
+	 * @param int    $limit Maximum stored length.
+	 */
+	private function sanitize_limited_text( string $value, int $limit ): string {
+		return substr( sanitize_text_field( $value ), 0, $limit );
+	}
+
+	/**
+	 * Sanitize a URL parameter while preserving invalid input for later validation failure.
+	 *
+	 * @param string $value Raw URL.
+	 */
+	private function sanitize_url_param( string $value ): string {
+		$value = sanitize_text_field( $value );
+		if ( '' === $value ) {
+			return '';
+		}
+
+		$url = esc_url_raw( $value );
+		return '' === $url ? $value : $url;
+	}
+
+	/**
+	 * Sanitize a space-delimited OAuth scope string.
+	 *
+	 * @param string $scope Raw scope value.
+	 */
+	private function sanitize_scope( string $scope ): string {
+		$scope = sanitize_text_field( $scope );
+		$scope = preg_replace( '/[^A-Za-z0-9:_\-. ]/', '', $scope ) ?? '';
+		$scope = preg_replace( '/\s+/', ' ', trim( $scope ) ) ?? '';
+
+		return substr( $scope, 0, 500 );
 	}
 
 	/**
@@ -485,8 +645,23 @@ final class AuthorizationController {
 	 * @return string
 	 */
 	private function scope_from_params( array $params ): string {
+		return implode( ' ', $this->scope_tokens_from_params( $params ) );
+	}
+
+	/**
+	 * Return normalized requested scope tokens, defaulting to read access.
+	 *
+	 * @param array<string, string> $params Authorization parameters.
+	 * @return string[]
+	 */
+	private function scope_tokens_from_params( array $params ): array {
 		$scope = trim( (string) ( $params['scope'] ?? '' ) );
-		return '' === $scope ? 'content:read' : preg_replace( '/\s+/', ' ', $scope );
+		if ( '' === $scope ) {
+			return array( 'content:read' );
+		}
+
+		$tokens = preg_split( '/\s+/', $scope );
+		return array_values( array_filter( is_array( $tokens ) ? array_map( 'strval', $tokens ) : array() ) );
 	}
 
 	/**
@@ -504,6 +679,31 @@ final class AuthorizationController {
 		$allowed = $client->getRedirectUri();
 		$allowed = is_array( $allowed ) ? $allowed : array( $allowed );
 		return in_array( $redirect_uri, $allowed, true );
+	}
+
+	/**
+	 * Validate the PKCE S256 code challenge shape.
+	 *
+	 * @param string $code_challenge Sanitized code challenge.
+	 */
+	private function valid_code_challenge( string $code_challenge ): bool {
+		return 1 === preg_match( '/^[A-Za-z0-9_-]{43,128}$/', $code_challenge );
+	}
+
+	/**
+	 * Validate requested scopes against supported connector scopes.
+	 *
+	 * @param string[] $scopes Requested scope tokens.
+	 */
+	private function scope_tokens_supported( array $scopes ): bool {
+		$supported = Helpers::supported_scopes();
+		foreach ( $scopes as $scope ) {
+			if ( ! in_array( $scope, $supported, true ) ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 
 	/**

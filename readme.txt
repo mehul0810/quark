@@ -4,7 +4,7 @@ Tags: ai, content, claude, media, chatgpt
 Requires at least: 6.5
 Tested up to: 6.9
 Requires PHP: 8.2
-Stable tag: 0.1.0
+Stable tag: 0.2.0
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -164,6 +164,15 @@ Composer dependencies for production releases are installed with:
 
 == Changelog ==
 
+= 0.2.0 =
+
+* Added opt-in diagnostic logging for AI assistant connection flows.
+* Added an Advanced setting to enable diagnostics and a Logs tab that appears only when logging is enabled.
+* Added sanitized lifecycle and error logs for dynamic client registration, OAuth discovery, authorization, token exchange, and MCP authorization checks.
+* Added 30-day log retention, opportunistic pruning, pagination, and clear-log controls.
+* Hardened OAuth consent parameter handling with allowlisted sanitization and stricter validation for response type, resource, PKCE, scopes, redirect URI, and consent decisions.
+* Added unit coverage for diagnostic logging, redaction, repository behavior, and OAuth authorization parameter handling.
+
 = 0.1.0 =
 
 * Connect a supported AI assistant by copying one connection URL from WordPress.
@@ -174,6 +183,10 @@ Composer dependencies for production releases are installed with:
 * Added clearer privacy notes and extra safety checks for testing.
 
 == Upgrade Notice ==
+
+= 0.2.0 =
+
+Adds opt-in connection diagnostics and hardens OAuth consent request handling.
 
 = 0.1.0 =
 
